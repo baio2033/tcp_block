@@ -23,22 +23,77 @@ def eth_addr(addr):
     return mac
 
 def parse_packet(packet):
+	eth_len = 14
+	eth_dst = packet[:6]
+	eth_src = packet[6:12]
+	if DEBUG:
+		print "###################################################"
+		print "\n[+] ethernet header info"
+		print "\tdst mac : ", eth_addr(eth_dst)
+		print "\tsrc mac : ", eth_addr(eth_src)
+
+	eth_protocol = socket.ntohs(unpack_from('!H', packet, 0xC)[0])
+	if eth_protocol == 8:
+		ip_header = packet[eth_len:20+eth_len]
+    	iph = unpack('!BBHHHBBH4s4s', ip_header)
+
+    	version_ihl = iph[0]
+    	version = version_ihl >> 4
+    	ihl = version_ihl & 0xF
+    	iph_len = ihl * 4
+    	protocol = iph[6]
+    	s_addr = socket.inet_ntoa(iph[8])
+    	d_addr = socket.inet_ntoa(iph[9])
+
+    	if DEBUG:
+            print "[+] ip header info"
+            print "\tprotocol : ", protocol
+            print "\tsrc ip : ", s_addr
+            print "\tdst ip : ", d_addr
+
+        if protocol == 6:
+            ## TCP protocol
+            t_ptr = iph_len + eth_len
+            tcp_header = packet[t_ptr:t_ptr+20]
+
+            tcph = unpack('!HHLLBBHHH', tcp_header)
+
+            src_port = tcph[0]
+            dst_port = tcph[1]
+            seq = tcph[2]
+            ack = tcph[3]
+            doff_reserved = tcph[4]
+            tcph_len = (doff_reserved >> 4) * 4            
+            flag = tcph[5]
+            chksum = tcph[6]
+            if DEBUG:
+                print "[+] tcp header info"
+                print "\tsrc port : ", src_port
+                print "\tdst port : ", dst_port
+                print "\tseq : ", hex(seq), "\tack : ", hex(ack), "\n"  
+                print "\tflag : ", hex(flag)
+                print "\tchecksum : ", hex(chksum)                    
+
+            header_len = eth_len + iph_len + tcph_len
+            data_len = len(packet) - header_len   
+            
+            if data_len > 0:   
+                data = packet[header_len:]                
+
+            if DEBUG:
+                if data_len > 0:
+                    print "[+] data (length : ", data_len, ")"
+                    print data                                                             
+    
+
+def backward_rst(packet, s):
     rst_packet = None
     eth_len = 14
     eth_header = packet[:eth_len]
     eth = unpack('!6s6sH', eth_header)
     eth_protocol = socket.ntohs(eth[2])
 
-    eth_dst = packet[:6]
-    eth_src = packet[6:12]
-
     rst_eth = pack('!6s6sH', eth[1], eth[0], eth[2])
-
-    if DEBUG:
-        print "###################################################"
-        print "\n[+] ethernet header info"
-        print "\tdst mac : ", eth_addr(eth_dst)
-        print "\tsrc mac : ", eth_addr(eth_src)
 
     if eth_protocol == 8:
         ip_header = packet[eth_len:20+eth_len]
@@ -55,11 +110,6 @@ def parse_packet(packet):
         protocol = iph[6]        
         s_addr = socket.inet_ntoa(iph[8])
         d_addr = socket.inet_ntoa(iph[9])
-        if DEBUG:
-            print "[+] ip header info"
-            print "\tprotocol : ", protocol
-            print "\tsrc ip : ", s_addr
-            print "\tdst ip : ", d_addr
 
         rst_ip = pack('!BBHHHBBH4s4s', iph[0], iph[1], iph[2], iph[3], iph[4], iph[5], iph[6], rst_chk_sum, iph[9], iph[8])
         if protocol == 6:
@@ -78,12 +128,6 @@ def parse_packet(packet):
             tcp_chksum = packet[50:52]
             rst_tcp_chksum = checksum(tcp_chksum)
 
-            if DEBUG:
-                print "[+] tcp header info"
-                print "\tsrc port : ", src_port
-                print "\tdst port : ", dst_port
-                print "\tseq : ", seq, "\tack : ", ack, "\n"                      
-
             header_len = eth_len + iph_len + tcph_len
             data_len = len(packet) - header_len   
 
@@ -95,21 +139,18 @@ def parse_packet(packet):
                 data = ''
                 rst_ack = seq + 1
 
-            rst_tcp = pack('!HHLLBBHHH', tcph[1], tcph[0], rst_seq, rst_ack, tcph[4], tcph[5], tcph[6], rst_tcp_chksum, tcph[8])
-
-            if DEBUG:
-                if data_len > 0:
-                    print "[+] data (length : ", data_len, ")"
-                    print data                                                             
+            rst_tcp = pack('!HHLLBBHHH', tcph[1], tcph[0], rst_seq, rst_ack, tcph[4], tcph[5], tcph[6], rst_tcp_chksum, tcph[8])                                                            
     
             rst_packet = rst_eth + rst_ip + rst_tcp + data
-    
-            rs = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            rs.connect((s_addr, src_port))
-            rs.sendall(rst_packet)
-            rs.close()
-
-        return rst_packet
+            print "\t\t\t\t\tORIGINAL"
+            parse_packet(packet)
+            print "\t\t\t\t\tRESET"
+            parse_packet(rst_packet)                       
+            
+            s.sendall(rst_packet)
+            #rs.sendall(rst_packet)
+            
+        
 
 def main(argv):
 	if len(sys.argv) < 2:
@@ -129,7 +170,7 @@ def main(argv):
 		try:
 			packet = s.recv(65565)	
 			if len(packet) > 0:
-				parse_packet(packet)
+				backward_rst(packet, s)
 
 		except socket.error, msg:
 			print msg
