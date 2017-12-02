@@ -53,3 +53,11 @@ struct tcp_header{
 	u_int16_t tcp_sum;
 	u_int16_t tcp_ptr;
 };
+
+struct __attribute__((packed)) pseudohdr{
+	struct in_addr src;
+	struct in_addr dst;
+	u_int8_t zero;
+	u_int8_t protocol;
+	u_int16_t len;	
+};

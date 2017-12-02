@@ -19,6 +19,38 @@ void packet_dump(u_char* packet, int packet_len){
 	printf("\n");
 }
 
+u_int16_t ip_sum_calc( u_int16_t len_ip_header, u_int16_t * buff )
+{
+        u_int16_t word16;
+        u_int sum = 0;
+        u_int16_t i;
+        // make 16 bit words out of every two adjacent 8 bit words in the packet
+        // and add them up
+        for( i = 0; i < len_ip_header; i = i+2 )
+        {
+                word16 = ( ( buff[i]<<8) & 0xFF00 )+( buff[i+1] & 0xFF );
+                sum = sum + (u_int) word16;
+        }
+        // take only 16 bits out of the 32 bit sum and add up the carries
+        while( sum >> 16 )
+                sum = ( sum & 0xFFFF ) + ( sum >> 16 );
+        // one's complement the result
+        sum = ~sum;
+       
+        return ((u_int16_t) sum);
+}
+
+u_int16_t tcp_checksum(u_int16_t *buf, int len){
+	u_long sum = 0;
+	while(len--){
+		sum += *buf++;
+	}
+	sum = (sum >> 16) + (sum & 0xffff);
+	sum += (sum >> 16);
+
+	return (u_int16_t)(~sum);
+}
+
 void make_rst_etherhdr(struct etherhdr *ether, struct etherhdr *rst_ether){	
 	memcpy(rst_ether->dst,ether->src,sizeof(ether->dst));
 	memcpy(rst_ether->src,ether->dst,sizeof(ether->src));
@@ -27,9 +59,10 @@ void make_rst_etherhdr(struct etherhdr *ether, struct etherhdr *rst_ether){
 
 void make_rst_iphdr(struct iphdr *ip, struct iphdr *rst_ip){
 	memcpy(rst_ip, ip, sizeof(struct iphdr));
-	rst_ip->ip_len = htons(54);
+	rst_ip->ip_len = htons(54)	;
 	memcpy(&rst_ip->ip_src, &ip->ip_dst, sizeof(ip->ip_dst));
 	memcpy(&rst_ip->ip_dst, &ip->ip_src, sizeof(ip->ip_src));
+	rst_ip->ip_sum = 0;
 }
 
 void make_rst_tcphdr(struct tcp_header *tcp, struct tcp_header *rst_tcp, int flag){
@@ -37,7 +70,12 @@ void make_rst_tcphdr(struct tcp_header *tcp, struct tcp_header *rst_tcp, int fla
 	memcpy(&rst_tcp->tcp_src, &tcp->tcp_dst, sizeof(tcp->tcp_dst));
 	memcpy(&rst_tcp->tcp_dst, &tcp->tcp_src, sizeof(tcp->tcp_src));
 
-	rst_tcp->tcp_flag = 0x14;
+	rst_tcp->tcp_off = 5;
+
+	if(rst_tcp->tcp_src == ntohs(0x50) || rst_tcp->tcp_dst == ntohs(0x50))
+		rst_tcp->tcp_flag = 0x11;
+	else
+		rst_tcp->tcp_flag = 0x14;
 
 	if(flag > 0){
 		rst_tcp->tcp_seq = tcp->tcp_ack;
@@ -58,6 +96,9 @@ void check_packet(pcap_t *handle, u_char *packet, int packet_len){
 	int ether_size = sizeof(struct etherhdr);
 	int ip_size = sizeof(struct iphdr);
 	int tcp_size = sizeof(struct tcp_header);
+	int mode;
+
+	struct pseudohdr pheader;
 
 	recv_ether = (struct ehterhdr *)packet;	
 	if(ntohs(recv_ether->ether_type) != ETHERTYPE_IP) return;
@@ -73,23 +114,33 @@ void check_packet(pcap_t *handle, u_char *packet, int packet_len){
 	rst_iphdr = (struct iphdr *)malloc(sizeof(struct iphdr));
 	rst_tcp = (struct tcp_header *)malloc(sizeof(struct tcp_header));
 
-	printf("data length : %d\n", flag);
+	//printf("data length : %d\n", flag);
 	make_rst_etherhdr(recv_ether, rst_ether);	
-	make_rst_iphdr(recv_iphdr, rst_iphdr);	
+	make_rst_iphdr(recv_iphdr, rst_iphdr);
+	rst_iphdr->ip_sum = ip_sum_calc(ip_size, rst_iphdr);	
 	make_rst_tcphdr(recv_tcp, rst_tcp, flag);	
 
+	pheader.src.s_addr = rst_iphdr->ip_src.s_addr;
+	pheader.dst.s_addr = rst_iphdr->ip_dst.s_addr;
+	pheader.protocol = rst_iphdr->ip_p;
+	pheader.len = htons(sizeof(struct tcp_header)+packet_len - header_len);
+
+	rst_tcp->tcp_sum = tcp_checksum((u_int16_t*)&pheader, sizeof(struct pseudohdr) / sizeof(u_int16_t));
+
 	rst_packet = (u_char*)malloc(packet_len);
-	memcpy(rst_packet, rst_ether, ether_size);	
-	memcpy(rst_packet + ether_size, rst_iphdr, ip_size);	
-	memcpy(rst_packet + ether_size + ip_size, rst_tcp, tcp_size);	
+	memcpy(rst_packet, rst_ether, ether_size);
+	memcpy(rst_packet + ether_size, rst_iphdr, ip_size);
+	memcpy(rst_packet + ether_size + ip_size, rst_tcp, tcp_size);
 
 	printf("========================================================\n");
+	printf("\t\tOriginal packet\n");
+	packet_dump(packet, header_len);
 	printf("\t\tRST packet\n");
-	packet_dump(rst_packet, ether_size + ip_size + tcp_size);
+	packet_dump(rst_packet, header_len);
 
 	while(1){
 		if(pcap_sendpacket(handle, rst_packet, header_len) == 0) {
-			exit(1);
+			printf("\n[+] Send RST packet!\n");			
 			break;
 		}
 	}
@@ -113,7 +164,7 @@ int main(int argc, char *argv[]){
 
 	dev = argv[1];
 
-	handle = pcap_open_live(dev, BUFSIZ, 1, 1000, errbuf);
+	handle = pcap_open_live(dev, BUFSIZ, 1, 1, errbuf);
 	if(handle == NULL){
 		printf("\n[-] fail to open device\n");
 		exit(1);
@@ -127,7 +178,7 @@ int main(int argc, char *argv[]){
 	while(1){
 		ret = pcap_next_ex(handle, &header, &packet);
 		if(ret == 0){
-			printf("[-] time out...\n");
+			//printf("[-] time out...\n");
 			continue;
 		}
 		else if(ret < 0){
@@ -135,8 +186,8 @@ int main(int argc, char *argv[]){
 			break;
 		}
 		else{
-			printf("#################################################\n");
-			printf("\t\t[ %d frame ] ( legnth : %d )\n",cnt++, header->len);			
+			//printf("#################################################\n");
+			//printf("\t\t[ %d frame ] ( legnth : %d )\n",cnt++, header->len);			
 			//packet_dump(packet, header->len);
 			check_packet(handle, packet, header->len);
 		}
