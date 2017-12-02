@@ -11,4 +11,4 @@ TCP block (RST / FIN)
 # Usage
 (python 2.7)
 
-python scapy_tcp_block.py <<interface>>
+python scapy_tcp_block.py <device>
